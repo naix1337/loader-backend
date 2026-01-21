@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.production
+*.log
+coverage/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+keys/*.pem
+!keys/.gitkeep
+*.db
+*.db-journal
+.vercel

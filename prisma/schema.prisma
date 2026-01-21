@@ -1,0 +1,384 @@
+// This is your Prisma schema file
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===================================
+// USER & AUTHENTICATION
+// ===================================
+
+model User {
+  id            String   @id @default(uuid())
+  username      String   @unique
+  email         String   @unique
+  passwordHash  String
+  role          UserRole @default(USER)
+  
+  // Status
+  isActive      Boolean  @default(true)
+  isBanned      Boolean  @default(false)
+  banReason     String?
+  bannedAt      DateTime?
+  bannedBy      String?
+  
+  // MFA
+  mfaEnabled    Boolean  @default(false)
+  mfaSecret     String?
+  
+  // Tracking
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  lastLoginAt   DateTime?
+  lastLoginIp   String?
+  
+  // Relations
+  licenses      License[]
+  sessions      Session[]
+  hwidRecords   HWIDRecord[]
+  loginLogs     LoginLog[]
+  auditLogs     AuditLog[]
+  
+  // Forum
+  threads       Thread[]
+  posts         Post[]
+  likes         Like[]
+  sentMessages  DirectMessage[] @relation("SentMessages")
+  receivedMessages DirectMessage[] @relation("ReceivedMessages")
+  
+  @@map("users")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+
+// ===================================
+// LICENSING
+// ===================================
+
+model License {
+  id            String        @id @default(uuid())
+  key           String        @unique
+  type          LicenseType
+  
+  // Validity
+  isActive      Boolean       @default(true)
+  isRevoked     Boolean       @default(false)
+  revokedAt     DateTime?
+  revokedReason String?
+  
+  // Binding
+  userId        String?
+  user          User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  // Expiration
+  expiresAt     DateTime?
+  activatedAt   DateTime?
+  
+  // Device Limits
+  maxDevices    Int           @default(1)
+  deviceCount   Int           @default(0)
+  
+  // Metadata
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  createdBy     String?
+  
+  // Relations
+  sessions      Session[]
+  hwidRecords   HWIDRecord[]
+  heartbeats    Heartbeat[]
+  
+  @@map("licenses")
+}
+
+enum LicenseType {
+  ONETIME       // One-time activation
+  TIME_BASED    // X days validity
+  LIFETIME      // Unlimited
+}
+
+// ===================================
+// HARDWARE FINGERPRINTING
+// ===================================
+
+model HWIDRecord {
+  id              String   @id @default(uuid())
+  
+  // Fingerprint Components
+  cpuId           String?
+  diskSerial      String?
+  macHash         String?
+  biosHash        String?
+  osHash          String?
+  compositeFP     String   @unique  // Combined hash
+  
+  // Trust & Risk
+  trustScore      Float    @default(100.0)
+  riskScore       Float    @default(0.0)
+  isFlagged       Boolean  @default(false)
+  flagReason      String?
+  
+  // Binding
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  licenseId       String
+  license         License  @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  
+  // Metadata
+  firstSeenAt     DateTime @default(now())
+  lastSeenAt      DateTime @updatedAt
+  changeCount     Int      @default(0)
+  
+  // VM/Anti-Cheat Detection
+  isVirtualMachine Boolean @default(false)
+  vmType          String?
+  
+  // Relations
+  riskEvents      RiskEvent[]
+  
+  @@map("hwid_records")
+}
+
+// ===================================
+// SESSIONS & HEARTBEAT
+// ===================================
+
+model Session {
+  id              String   @id @default(uuid())
+  sessionToken    String   @unique
+  
+  // Session Data
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  licenseId       String
+  license         License  @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  
+  // Security
+  ipAddress       String
+  userAgent       String?
+  geoLocation     String?
+  
+  // Crypto
+  aesKey          String   // Encrypted session AES key
+  publicKey       String?  // Client's public RSA key
+  
+  // Status
+  isActive        Boolean  @default(true)
+  invalidatedAt   DateTime?
+  invalidateReason String?
+  
+  // Timestamps
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime
+  lastHeartbeat   DateTime @default(now())
+  
+  // Relations
+  heartbeats      Heartbeat[]
+  
+  @@map("sessions")
+}
+
+model Heartbeat {
+  id              String   @id @default(uuid())
+  
+  sessionId       String
+  session         Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  licenseId       String
+  license         License  @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  
+  timestamp       DateTime @default(now())
+  
+  // Health Data
+  cpuUsage        Float?
+  memoryUsage     Float?
+  isGameRunning   Boolean  @default(false)
+  
+  @@map("heartbeats")
+}
+
+// ===================================
+// SECURITY & AUDIT
+// ===================================
+
+model RiskEvent {
+  id              String   @id @default(uuid())
+  
+  hwidRecordId    String
+  hwidRecord      HWIDRecord @relation(fields: [hwidRecordId], references: [id], onDelete: Cascade)
+  
+  eventType       RiskEventType
+  severity        Int      // 1-10
+  description     String
+  
+  // Context
+  ipAddress       String?
+  geoLocation     String?
+  metadata        String?  // JSON
+  
+  createdAt       DateTime @default(now())
+  
+  @@map("risk_events")
+}
+
+enum RiskEventType {
+  HWID_CHANGED
+  GEO_ANOMALY
+  VM_DETECTED
+  MULTIPLE_DEVICES
+  SUSPICIOUS_LOGIN
+  RATE_LIMIT_EXCEEDED
+}
+
+model LoginLog {
+  id              String   @id @default(uuid())
+  
+  userId          String?
+  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  username        String
+  success         Boolean
+  failReason      String?
+  
+  ipAddress       String
+  userAgent       String?
+  geoLocation     String?
+  
+  timestamp       DateTime @default(now())
+  
+  @@map("login_logs")
+}
+
+model AuditLog {
+  id              String   @id @default(uuid())
+  
+  userId          String?
+  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  action          String
+  resource        String
+  resourceId      String?
+  changes         String?  // JSON
+  
+  ipAddress       String
+  timestamp       DateTime @default(now())
+  
+  @@map("audit_logs")
+}
+
+model NonceStore {
+  id              String   @id @default(uuid())
+  nonce           String   @unique
+  expiresAt       DateTime
+  
+  @@map("nonce_store")
+}
+
+// ===================================
+// FORUM SYSTEM
+// ===================================
+
+model Category {
+  id              String   @id @default(uuid())
+  name            String
+  slug            String   @unique
+  description     String?
+  order           Int      @default(0)
+  isActive        Boolean  @default(true)
+  
+  threads         Thread[]
+  
+  @@map("categories")
+}
+
+model Thread {
+  id              String   @id @default(uuid())
+  title           String
+  slug            String
+  
+  authorId        String
+  author          User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  
+  categoryId      String
+  category        Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  
+  isPinned        Boolean  @default(false)
+  isLocked        Boolean  @default(false)
+  isHidden        Boolean  @default(false)
+  
+  viewCount       Int      @default(0)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  posts           Post[]
+  
+  @@map("threads")
+}
+
+model Post {
+  id              String   @id @default(uuid())
+  content         String   @db.Text
+  
+  authorId        String
+  author          User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  
+  threadId        String
+  thread          Thread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  
+  // Moderation
+  isHidden        Boolean  @default(false)
+  isShadowDeleted Boolean  @default(false)
+  hiddenReason    String?
+  
+  // Editing
+  isEdited        Boolean  @default(false)
+  editedAt        DateTime?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  likes           Like[]
+  
+  @@map("posts")
+}
+
+model Like {
+  id              String   @id @default(uuid())
+  
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  postId          String
+  post            Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime @default(now())
+  
+  @@unique([userId, postId])
+  @@map("likes")
+}
+
+model DirectMessage {
+  id              String   @id @default(uuid())
+  
+  senderId        String
+  sender          User     @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  
+  receiverId      String
+  receiver        User     @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: Cascade)
+  
+  content         String   @db.Text
+  isRead          Boolean  @default(false)
+  readAt          DateTime?
+  
+  createdAt       DateTime @default(now())
+  
+  @@map("direct_messages")
+}
